@@ -14,13 +14,13 @@ val versionNameValue = if (versionPropertiesFile.exists()) {
 android {
     namespace = "dev.iyas.ninilala"
     compileSdk {
-        version = release(37)
+        version = release(36)
     }
 
     defaultConfig {
         applicationId = "dev.iyas.ninilala"
         minSdk = 33
-        targetSdk = 37
+        targetSdk = 36
         versionCode = versionCodeValue
         versionName = versionNameValue
 
