@@ -26,6 +26,7 @@ class CameraEncoder(
     private val context: Context,
     private val useFrontCamera: Boolean,
     private val server: StreamServer,
+    private val deviceRotation: Int = 0,
 ) {
     private val tag = "CameraEncoder"
     private val cameraManager = context.getSystemService(CameraManager::class.java)
@@ -72,7 +73,13 @@ class CameraEncoder(
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
             setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
             val orientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
-            setInteger(MediaFormat.KEY_ROTATION, orientation)
+            val facing = characteristics.get(CameraCharacteristics.LENS_FACING) ?: CameraCharacteristics.LENS_FACING_BACK
+            val rotation = if (facing == CameraCharacteristics.LENS_FACING_FRONT) {
+                (orientation + deviceRotation) % 360
+            } else {
+                (orientation - deviceRotation + 360) % 360
+            }
+            setInteger(MediaFormat.KEY_ROTATION, rotation)
         }
 
         val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC).also { encoder = it }

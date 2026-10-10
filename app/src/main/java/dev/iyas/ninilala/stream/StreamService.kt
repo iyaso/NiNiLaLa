@@ -16,10 +16,13 @@ import androidx.core.app.ServiceCompat
 import androidx.lifecycle.LifecycleService
 import dev.iyas.ninilala.MainActivity
 import dev.iyas.ninilala.R
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.launch
 
 class StreamService : LifecycleService() {
     private val tag = "StreamService"
@@ -28,7 +31,8 @@ class StreamService : LifecycleService() {
     private var server: StreamServer? = null
     private var advertiser: NsdAdvertiser? = null
     private var encoder: CameraEncoder? = null
-    private var viewerStateThread: Thread? = null
+    private var viewerStateJob: Job? = null
+    private var isStopping = false
 
     override fun onCreate() {
         super.onCreate()
@@ -77,18 +81,28 @@ class StreamService : LifecycleService() {
 
         val streamServer = StreamServer().also { server = it }
         streamServer.start()
-        viewerStateThread = Thread({
-            runBlocking {
-                streamServer.viewerConnected.collect { hasViewer ->
-                    _viewerConnected.value = hasViewer
-                }
-            }
-        }, "sg-viewer-state").also { it.isDaemon = true; it.start() }
         val nsd = NsdAdvertiser(this).also { advertiser = it }
         nsd.register(streamServer.port)
 
+        viewerStateJob = GlobalScope.launch(Dispatchers.IO) {
+            streamServer.viewerConnected.collect { hasViewer ->
+                _viewerConnected.value = hasViewer
+            }
+        }
+
         try {
-            encoder = CameraEncoder(this, useFront, streamServer).also { it.start() }
+            val rotation = getSystemService(Context.WINDOW_SERVICE)
+                .let { it as android.view.WindowManager }
+                .defaultDisplay
+                .rotation
+            val degrees = when (rotation) {
+                android.view.Surface.ROTATION_0 -> 0
+                android.view.Surface.ROTATION_90 -> 90
+                android.view.Surface.ROTATION_180 -> 180
+                android.view.Surface.ROTATION_270 -> 270
+                else -> 0
+            }
+            encoder = CameraEncoder(this, useFront, streamServer, degrees).also { it.start() }
             Log.i(tag, "streaming on port ${streamServer.port}")
         } catch (e: Exception) {
             Log.e(tag, "failed to start camera encoder", e)
@@ -98,12 +112,15 @@ class StreamService : LifecycleService() {
     }
 
     private fun stopStreaming() {
+        if (isStopping) return
+        isStopping = true
+
         runCatching { encoder?.stop() }
         encoder = null
         runCatching { advertiser?.unregister() }
         advertiser = null
-        viewerStateThread?.interrupt()
-        viewerStateThread = null
+        viewerStateJob?.cancel()
+        viewerStateJob = null
         runCatching { server?.stop() }
         server = null
         _viewerConnected.value = false
@@ -111,7 +128,8 @@ class StreamService : LifecycleService() {
             if (lock.isHeld) lock.release()
         }
         wakeLock = null
-        stopForeground(STOP_FOREGROUND_REMOVE)
+        runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+        isStopping = false
     }
 
     override fun onDestroy() {
