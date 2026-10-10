@@ -94,13 +94,31 @@ fun StreamScreen(
     }
 
     DisposableEffect(streaming) {
+        val window = activity?.window
+        val originalBrightness = window?.attributes?.screenBrightness
         if (streaming) {
-            activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            window?.attributes?.apply {
+                screenBrightness = 0.1f
+                window?.attributes = this
+            }
         } else {
-            activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            originalBrightness?.let { brightness ->
+                window?.attributes?.apply {
+                    screenBrightness = brightness
+                    window?.attributes = this
+                }
+            }
         }
         onDispose {
-            activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            originalBrightness?.let { brightness ->
+                window?.attributes?.apply {
+                    screenBrightness = brightness
+                    window?.attributes = this
+                }
+            }
         }
     }
 
