@@ -1,7 +1,6 @@
 package dev.iyas.ninilala.ui
 
-import android.view.SurfaceHolder
-import android.view.SurfaceView
+import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -22,8 +21,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -33,11 +34,12 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.alexvas.rtsp.RtspClient
+import com.alexvas.rtsp.widget.RtspStatusListener
+import com.alexvas.rtsp.widget.RtspSurfaceView
 import dev.iyas.ninilala.R
 import dev.iyas.ninilala.watch.DiscoveredStream
 import dev.iyas.ninilala.watch.LanDiscovery
-import dev.iyas.ninilala.watch.PlayerConnectionState
-import dev.iyas.ninilala.watch.StreamPlayer
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.stateIn
 
@@ -126,12 +128,8 @@ fun PlayingScreen(
     stream: DiscoveredStream,
     onClose: () -> Unit,
 ) {
-    val player = remember { StreamPlayer() }
-    val connectionState by player.connectionState.collectAsStateWithLifecycle()
-
-    DisposableEffect(stream.host, stream.port) {
-        onDispose { player.stop() }
-    }
+    val context = LocalContext.current
+    var statusText by remember { mutableStateOf<String?>(null) }
 
     Box(
         modifier = Modifier
@@ -140,34 +138,40 @@ fun PlayingScreen(
     ) {
         AndroidView(
             factory = { ctx ->
-                SurfaceView(ctx).apply {
-                    holder.addCallback(object : SurfaceHolder.Callback {
-                        override fun surfaceCreated(holder: SurfaceHolder) {
-                            player.start(stream.host, stream.port, holder.surface)
+                RtspSurfaceView(ctx).apply {
+                    val uri = Uri.parse("rtsp://${stream.host}:${stream.port}/stream")
+                    init(
+                        uri = uri,
+                        username = null,
+                        password = null,
+                        userAgent = "NiNiLaLa",
+                        socketTimeout = 5000,
+                        transport = RtspClient.Transport.TCP
+                    )
+                    
+                    setStatusListener(object : RtspStatusListener {
+                        override fun onRtspStatusConnecting() {
+                            statusText = context.getString(R.string.status_connecting)
                         }
 
-                        override fun surfaceChanged(
-                            holder: SurfaceHolder,
-                            format: Int,
-                            width: Int,
-                            height: Int,
-                        ) = Unit
+                        override fun onRtspStatusConnected() {
+                            statusText = null
+                        }
 
-                        override fun surfaceDestroyed(holder: SurfaceHolder) {
-                            player.stop()
+                        override fun onRtspStatusDisconnected() {
+                            statusText = context.getString(R.string.status_reconnecting)
+                        }
+
+                        override fun onRtspStatusFailed(message: String?) {
+                            statusText = context.getString(R.string.status_failed)
                         }
                     })
+                    
+                    start(requestVideo = true, requestAudio = false, requestApplication = false)
                 }
             },
             modifier = Modifier.fillMaxSize(),
         )
-
-        val statusText = when (connectionState) {
-            PlayerConnectionState.Connecting -> stringResource(R.string.status_connecting)
-            PlayerConnectionState.Reconnecting -> stringResource(R.string.status_reconnecting)
-            PlayerConnectionState.Failed -> stringResource(R.string.status_failed)
-            else -> null
-        }
 
         if (statusText != null) {
             Box(
@@ -176,7 +180,7 @@ fun PlayingScreen(
                     .padding(24.dp),
             ) {
                 Text(
-                    text = statusText,
+                    text = statusText!!,
                     style = MaterialTheme.typography.titleMedium,
                     color = Color.White,
                 )
@@ -184,7 +188,9 @@ fun PlayingScreen(
         }
 
         BackIconButton(
-            onClick = onClose,
+            onClick = {
+                onClose()
+            },
             modifier = Modifier
                 .align(Alignment.TopStart)
                 .statusBarsPadding()

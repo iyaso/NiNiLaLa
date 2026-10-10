@@ -14,24 +14,20 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.lifecycle.LifecycleService
+import com.pedro.common.ConnectChecker
+import com.pedro.rtspserver.RtspServerCamera2
 import dev.iyas.ninilala.MainActivity
 import dev.iyas.ninilala.R
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.GlobalScope
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.launch
 
 class StreamService : LifecycleService() {
     private val tag = "StreamService"
 
     private var wakeLock: PowerManager.WakeLock? = null
-    private var server: StreamServer? = null
+    private var rtspCamera: RtspServerCamera2? = null
     private var advertiser: NsdAdvertiser? = null
-    private var encoder: CameraEncoder? = null
-    private var viewerStateJob: Job? = null
     private var isStopping = false
 
     override fun onCreate() {
@@ -62,7 +58,7 @@ class StreamService : LifecycleService() {
 
     @SuppressLint("MissingPermission")
     private fun startStreaming(useFront: Boolean) {
-        if (server != null) return
+        if (rtspCamera != null) return
 
         ensureChannel()
         val notification = buildNotification()
@@ -79,33 +75,54 @@ class StreamService : LifecycleService() {
             "NiNiLaLa:Stream",
         ).also { it.acquire(6 * 60 * 60 * 1000L) }
 
-        val streamServer = StreamServer().also { server = it }
-        streamServer.start()
-        val nsd = NsdAdvertiser(this).also { advertiser = it }
-        nsd.register(streamServer.port)
+        val connectChecker = object : ConnectChecker {
+            override fun onConnectionStarted(url: String) {
+                Log.i(tag, "RTSP client connected: $url")
+                _viewerConnected.value = true
+            }
 
-        viewerStateJob = GlobalScope.launch(Dispatchers.IO) {
-            streamServer.viewerConnected.collect { hasViewer ->
-                _viewerConnected.value = hasViewer
+            override fun onConnectionSuccess() {
+                Log.i(tag, "RTSP connection established")
+            }
+
+            override fun onConnectionFailed(reason: String) {
+                Log.e(tag, "RTSP connection failed: $reason")
+                _viewerConnected.value = false
+            }
+
+            override fun onDisconnect() {
+                Log.i(tag, "RTSP client disconnected")
+                _viewerConnected.value = false
+            }
+
+            override fun onAuthError() {
+                Log.e(tag, "RTSP auth error")
+            }
+
+            override fun onAuthSuccess() {
+                Log.i(tag, "RTSP auth success")
             }
         }
 
         try {
-            val rotation = getSystemService(Context.WINDOW_SERVICE)
-                .let { it as android.view.WindowManager }
-                .defaultDisplay
-                .rotation
-            val degrees = when (rotation) {
-                android.view.Surface.ROTATION_0 -> 0
-                android.view.Surface.ROTATION_90 -> 90
-                android.view.Surface.ROTATION_180 -> 180
-                android.view.Surface.ROTATION_270 -> 270
-                else -> 0
+            val camera = RtspServerCamera2(this, connectChecker, RTSP_PORT).apply {
+                prepareVideo(1280, 720, 30, 2_000_000, 0)
+                prepareAudio(44100, 64 * 1024, false)
+                startStream()
             }
-            encoder = CameraEncoder(this, useFront, streamServer, degrees).also { it.start() }
-            Log.i(tag, "streaming on port ${streamServer.port}")
+            
+            if (useFront) {
+                runCatching { camera.switchCamera() }
+            }
+
+            rtspCamera = camera
+            
+            val nsd = NsdAdvertiser(this).also { advertiser = it }
+            nsd.register(RTSP_PORT)
+            
+            Log.i(tag, "RTSP streaming on port $RTSP_PORT")
         } catch (e: Exception) {
-            Log.e(tag, "failed to start camera encoder", e)
+            Log.e(tag, "failed to start RTSP streaming", e)
             stopStreaming()
             stopSelf()
         }
@@ -115,14 +132,12 @@ class StreamService : LifecycleService() {
         if (isStopping) return
         isStopping = true
 
-        runCatching { encoder?.stop() }
-        encoder = null
+        runCatching { rtspCamera?.stopStream() }
+        rtspCamera = null
+        
         runCatching { advertiser?.unregister() }
         advertiser = null
-        viewerStateJob?.cancel()
-        viewerStateJob = null
-        runCatching { server?.stop() }
-        server = null
+        
         _viewerConnected.value = false
         wakeLock?.let { lock ->
             if (lock.isHeld) lock.release()
@@ -181,6 +196,7 @@ class StreamService : LifecycleService() {
         const val EXTRA_FRONT_CAMERA = "front_camera"
         private const val CHANNEL_ID = "stream"
         private const val NOTIFICATION_ID = 1
+        private const val RTSP_PORT = 8554
 
         private val isRunning = MutableStateFlow(false)
         val running: StateFlow<Boolean> = isRunning.asStateFlow()

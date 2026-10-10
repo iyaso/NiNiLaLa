@@ -14,7 +14,7 @@ val versionNameValue = if (versionPropertiesFile.exists()) {
 android {
     namespace = "dev.iyas.ninilala"
     compileSdk {
-        version = release(36)
+        version = release(37)
     }
 
     defaultConfig {
@@ -67,6 +67,9 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.service)
     implementation(libs.kotlinx.coroutines.android)
+    implementation("com.github.pedroSG94:RTSP-Server:1.4.3")
+    implementation("com.github.pedroSG94.RootEncoder:library:2.8.1")
+    implementation("com.github.alexeyvasilyev:rtsp-client-android:6.1.1")
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
