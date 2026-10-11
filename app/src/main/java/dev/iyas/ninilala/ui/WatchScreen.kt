@@ -134,7 +134,8 @@ fun PlayingScreen(
     stream: DiscoveredStream,
     onClose: () -> Unit,
 ) {
-    val context = LocalContext.current
+    val connecting = stringResource(R.string.status_connecting)
+    val reconnecting = stringResource(R.string.status_reconnecting)
     var statusText by remember { mutableStateOf<String?>(null) }
     var videoSize by remember { mutableStateOf<IntSize?>(null) }
     val alive = remember { AtomicBoolean(true) }
@@ -192,7 +193,7 @@ fun PlayingScreen(
                     }
                     setStatusListener(object : RtspStatusListener {
                         override fun onRtspStatusConnecting() {
-                            statusText = context.getString(R.string.status_connecting)
+                            statusText = connecting
                         }
 
                         override fun onRtspStatusConnected() {
@@ -200,12 +201,12 @@ fun PlayingScreen(
                         }
 
                         override fun onRtspStatusDisconnected() {
-                            statusText = context.getString(R.string.status_reconnecting)
+                            statusText = reconnecting
                             postDelayed({ open() }, 1000)
                         }
 
                         override fun onRtspStatusFailed(message: String?) {
-                            statusText = context.getString(R.string.status_reconnecting)
+                            statusText = reconnecting
                             postDelayed({ open() }, 1000)
                         }
 
