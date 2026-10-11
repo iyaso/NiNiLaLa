@@ -5,14 +5,17 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -30,7 +33,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -130,12 +135,34 @@ fun PlayingScreen(
 ) {
     val context = LocalContext.current
     var statusText by remember { mutableStateOf<String?>(null) }
+    var videoSize by remember { mutableStateOf<IntSize?>(null) }
 
-    Box(
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black),
+        contentAlignment = Alignment.Center,
     ) {
+        val density = LocalDensity.current
+        val parentW = constraints.maxWidth.toFloat().coerceAtLeast(1f)
+        val parentH = constraints.maxHeight.toFloat().coerceAtLeast(1f)
+        val parentAspect = parentW / parentH
+        val size = videoSize?.takeIf { it.width > 0 && it.height > 0 }
+
+        val viewModifier: Modifier = if (size == null) {
+            Modifier.fillMaxSize()
+        } else {
+            val videoAspect = size.width.toFloat() / size.height.toFloat()
+            val (fitW, fitH) = if (parentAspect > videoAspect) {
+                parentH * videoAspect to parentH
+            } else {
+                parentW to parentW / videoAspect
+            }
+            Modifier
+                .width(with(density) { fitW.toDp() })
+                .height(with(density) { fitH.toDp() })
+        }
+
         AndroidView(
             factory = { ctx ->
                 RtspSurfaceView(ctx).apply {
@@ -148,7 +175,7 @@ fun PlayingScreen(
                         socketTimeout = 5000,
                         transport = RtspClient.Transport.TCP
                     )
-                    
+
                     setStatusListener(object : RtspStatusListener {
                         override fun onRtspStatusConnecting() {
                             statusText = context.getString(R.string.status_connecting)
@@ -165,12 +192,16 @@ fun PlayingScreen(
                         override fun onRtspStatusFailed(message: String?) {
                             statusText = context.getString(R.string.status_failed)
                         }
+
+                        override fun onRtspFrameSizeChanged(width: Int, height: Int) {
+                            videoSize = IntSize(width, height)
+                        }
                     })
-                    
+
                     start(requestVideo = true, requestAudio = false, requestApplication = false)
                 }
             },
-            modifier = Modifier.fillMaxSize(),
+            modifier = viewModifier,
         )
 
         if (statusText != null) {

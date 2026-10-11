@@ -4,6 +4,7 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.util.Size
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -14,6 +15,7 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -50,8 +52,12 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.google.zxing.BarcodeFormat
+import com.google.zxing.EncodeHintType
+import com.google.zxing.qrcode.QRCodeWriter
 import dev.iyas.ninilala.R
 import dev.iyas.ninilala.stream.PreviewCamera
 import dev.iyas.ninilala.stream.PreviewProfile
@@ -333,10 +339,12 @@ private fun FittedCameraPreview(
 private fun StreamingPanel(onStop: () -> Unit) {
     val scheme = MaterialTheme.colorScheme
     val hasViewer by StreamService.viewerConnected.collectAsStateWithLifecycle()
+    val webUrl by StreamService.webUrl.collectAsStateWithLifecycle()
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(scheme.background),
+        horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Spacer(
             modifier = Modifier
@@ -373,6 +381,11 @@ private fun StreamingPanel(onStop: () -> Unit) {
             }
         }
 
+        if (webUrl != null) {
+            Spacer(Modifier.height(32.dp))
+            WebViewerQr(url = webUrl!!)
+        }
+
         Spacer(
             modifier = Modifier
                 .weight(1f)
@@ -405,3 +418,51 @@ private fun StreamingPanel(onStop: () -> Unit) {
         }
     }
 }
+
+@Composable
+private fun WebViewerQr(url: String) {
+    val scheme = MaterialTheme.colorScheme
+    val qrBitmap = remember(url) { generateQrBitmap(url) }
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        if (qrBitmap != null) {
+            Image(
+                bitmap = qrBitmap.asImageBitmap(),
+                contentDescription = stringResource(R.string.web_viewer_qr_desc),
+                modifier = Modifier
+                    .size(170.dp)
+                    .clip(RoundedCornerShape(16.dp)),
+            )
+            Spacer(Modifier.height(12.dp))
+        }
+        Text(
+            text = url,
+            style = MaterialTheme.typography.bodyMedium,
+            color = scheme.onSurface.copy(alpha = 0.7f),
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text = stringResource(R.string.web_viewer_hint),
+            style = MaterialTheme.typography.bodySmall,
+            color = scheme.onSurface.copy(alpha = 0.45f),
+        )
+    }
+}
+
+private fun generateQrBitmap(content: String): Bitmap? = runCatching {
+    val size = 512
+    val matrix = QRCodeWriter().encode(
+        content,
+        BarcodeFormat.QR_CODE,
+        size,
+        size,
+        mapOf(EncodeHintType.MARGIN to 1),
+    )
+    val pixels = IntArray(size * size)
+    for (y in 0 until size) {
+        val offset = y * size
+        for (x in 0 until size) {
+            pixels[offset + x] = if (matrix.get(x, y)) 0xFF000000.toInt() else 0xFFFFFFFF.toInt()
+        }
+    }
+    Bitmap.createBitmap(pixels, size, size, Bitmap.Config.ARGB_8888)
+}.getOrNull()

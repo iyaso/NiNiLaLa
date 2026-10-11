@@ -8,25 +8,33 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.media.MediaCodec
 import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.lifecycle.LifecycleService
+import com.pedro.common.AudioCodec
 import com.pedro.common.ConnectChecker
-import com.pedro.rtspserver.RtspServerCamera2
+import com.pedro.common.VideoCodec
+import com.pedro.encoder.input.video.CameraHelper
+import com.pedro.library.base.Camera2Base
+import com.pedro.rtspserver.server.RtspServer
+import com.pedro.rtspserver.util.RtspServerStreamClient
 import dev.iyas.ninilala.MainActivity
 import dev.iyas.ninilala.R
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.nio.ByteBuffer
 
 class StreamService : LifecycleService() {
     private val tag = "StreamService"
 
     private var wakeLock: PowerManager.WakeLock? = null
-    private var rtspCamera: RtspServerCamera2? = null
+    private var rtspCamera: Camera2Base? = null
+    private var webServer: StreamWebServer? = null
     private var advertiser: NsdAdvertiser? = null
     private var isStopping = false
 
@@ -105,21 +113,28 @@ class StreamService : LifecycleService() {
         }
 
         try {
-            val camera = RtspServerCamera2(this, connectChecker, RTSP_PORT).apply {
-                prepareVideo(1280, 720, 30, 2_000_000, 0)
+            val web = StreamWebServer(this).also { webServer = it }
+            web.onViewerCountChanged = { count -> _viewerConnected.value = count > 0 }
+            if (web.startServer()) {
+                _webUrl.value = StreamWebServer.findLanUrl()
+            }
+
+            val camera = WebTappedRtspCamera(this, connectChecker, RTSP_PORT, web).apply {
+                // 5th arg is rotation: 90 = portrait, 0 = landscape. Wrong value streams rotated video.
+                prepareVideo(1280, 720, 30, 2_000_000, CameraHelper.getCameraOrientation(this@StreamService))
                 prepareAudio(44100, 64 * 1024, false)
                 startStream()
             }
-            
+
             if (useFront) {
                 runCatching { camera.switchCamera() }
             }
 
             rtspCamera = camera
-            
+
             val nsd = NsdAdvertiser(this).also { advertiser = it }
             nsd.register(RTSP_PORT)
-            
+
             Log.i(tag, "RTSP streaming on port $RTSP_PORT")
         } catch (e: Exception) {
             Log.e(tag, "failed to start RTSP streaming", e)
@@ -134,7 +149,11 @@ class StreamService : LifecycleService() {
 
         runCatching { rtspCamera?.stopStream() }
         rtspCamera = null
-        
+
+        runCatching { webServer?.stopServer() }
+        webServer = null
+        _webUrl.value = null
+
         runCatching { advertiser?.unregister() }
         advertiser = null
         
@@ -190,6 +209,58 @@ class StreamService : LifecycleService() {
             .build()
     }
 
+    // RtspServerCamera2 is final in 1.4.3, so Camera2Base is subclassed directly and the
+    // RTSP server wired in — exactly like RtspServerCamera2, plus the web-viewer taps.
+    private class WebTappedRtspCamera(
+        context: Context,
+        connectChecker: ConnectChecker,
+        port: Int,
+        private val web: StreamWebServer,
+    ) : Camera2Base(context) {
+
+        private val rtspServer = RtspServer(connectChecker, port)
+
+        fun startStream() {
+            startStream("")
+        }
+
+        override fun onAudioInfoImp(isStereo: Boolean, sampleRate: Int) {
+            rtspServer.setAudioInfo(sampleRate, isStereo)
+        }
+
+        override fun startStreamImp(url: String) {
+            rtspServer.startServer()
+        }
+
+        override fun stopStreamImp() {
+            rtspServer.stopServer()
+        }
+
+        override fun getAudioDataImp(audioBuffer: ByteBuffer, info: MediaCodec.BufferInfo) {
+            rtspServer.sendAudio(audioBuffer, info)
+        }
+
+        override fun onVideoInfoImp(sps: ByteBuffer, pps: ByteBuffer?, vps: ByteBuffer?) {
+            rtspServer.setVideoInfo(sps.duplicate(), pps?.duplicate(), vps?.duplicate())
+            web.setConfig(sps, pps)
+        }
+
+        override fun getVideoDataImp(videoBuffer: ByteBuffer, info: MediaCodec.BufferInfo) {
+            rtspServer.sendVideo(videoBuffer, info)
+            web.publish(videoBuffer, info)
+        }
+
+        override fun getStreamClient(): RtspServerStreamClient = RtspServerStreamClient(rtspServer)
+
+        override fun setVideoCodecImp(codec: VideoCodec) {
+            rtspServer.setVideoCodec(codec)
+        }
+
+        override fun setAudioCodecImp(codec: AudioCodec) {
+            rtspServer.setAudioCodec(codec)
+        }
+    }
+
     companion object {
         const val ACTION_START = "dev.iyas.ninilala.action.START"
         const val ACTION_STOP = "dev.iyas.ninilala.action.STOP"
@@ -203,6 +274,9 @@ class StreamService : LifecycleService() {
 
         private val _viewerConnected = MutableStateFlow(false)
         val viewerConnected: StateFlow<Boolean> = _viewerConnected.asStateFlow()
+
+        private val _webUrl = MutableStateFlow<String?>(null)
+        val webUrl: StateFlow<String?> = _webUrl.asStateFlow()
 
         fun start(context: Context, useFrontCamera: Boolean) {
             val intent = Intent(context, StreamService::class.java)

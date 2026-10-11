@@ -23,4 +23,6 @@
     <string name="status_failed">Connection failed</string>
     <string name="status_viewer_connected">Viewer connected</string>
     <string name="status_no_viewer">Waiting for viewer…</string>
+    <string name="web_viewer_hint">Scan to watch in any browser on this Wi-Fi</string>
+    <string name="web_viewer_qr_desc">QR code with the stream web address</string>
 </resources>
