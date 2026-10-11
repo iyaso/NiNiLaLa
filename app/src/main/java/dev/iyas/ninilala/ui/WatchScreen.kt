@@ -28,6 +28,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import java.util.concurrent.atomic.AtomicBoolean
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -136,6 +137,15 @@ fun PlayingScreen(
     val context = LocalContext.current
     var statusText by remember { mutableStateOf<String?>(null) }
     var videoSize by remember { mutableStateOf<IntSize?>(null) }
+    val alive = remember { AtomicBoolean(true) }
+    val player = remember { mutableStateOf<RtspSurfaceView?>(null) }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            alive.set(false)
+            player.value?.stop()
+        }
+    }
 
     BoxWithConstraints(
         modifier = Modifier
@@ -166,16 +176,20 @@ fun PlayingScreen(
         AndroidView(
             factory = { ctx ->
                 RtspSurfaceView(ctx).apply {
+                    player.value = this
                     val uri = Uri.parse("rtsp://${stream.host}:${stream.port}/stream")
-                    init(
-                        uri = uri,
-                        username = null,
-                        password = null,
-                        userAgent = "NiNiLaLa",
-                        socketTimeout = 5000,
-                        transport = RtspClient.Transport.TCP
-                    )
-
+                    fun open() {
+                        if (!alive.get()) return
+                        init(
+                            uri = uri,
+                            username = null,
+                            password = null,
+                            userAgent = "NiNiLaLa",
+                            socketTimeout = 5000,
+                            transport = RtspClient.Transport.TCP,
+                        )
+                        start(requestVideo = true, requestAudio = true, requestApplication = false)
+                    }
                     setStatusListener(object : RtspStatusListener {
                         override fun onRtspStatusConnecting() {
                             statusText = context.getString(R.string.status_connecting)
@@ -187,18 +201,19 @@ fun PlayingScreen(
 
                         override fun onRtspStatusDisconnected() {
                             statusText = context.getString(R.string.status_reconnecting)
+                            postDelayed({ open() }, 1000)
                         }
 
                         override fun onRtspStatusFailed(message: String?) {
-                            statusText = context.getString(R.string.status_failed)
+                            statusText = context.getString(R.string.status_reconnecting)
+                            postDelayed({ open() }, 1000)
                         }
 
                         override fun onRtspFrameSizeChanged(width: Int, height: Int) {
                             videoSize = IntSize(width, height)
                         }
                     })
-
-                    start(requestVideo = true, requestAudio = false, requestApplication = false)
+                    open()
                 }
             },
             modifier = viewModifier,

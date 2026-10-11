@@ -88,6 +88,11 @@ fun StreamScreen(
     LaunchedEffect(Unit) {
         val needed = buildList {
             if (!hasCameraPermission) add(Manifest.permission.CAMERA)
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
+                != PackageManager.PERMISSION_GRANTED
+            ) {
+                add(Manifest.permission.RECORD_AUDIO)
+            }
             if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS)
                 != PackageManager.PERMISSION_GRANTED
             ) {
@@ -160,6 +165,7 @@ fun StreamScreen(
                         permissionLauncher.launch(
                             arrayOf(
                                 Manifest.permission.CAMERA,
+                                Manifest.permission.RECORD_AUDIO,
                                 Manifest.permission.POST_NOTIFICATIONS,
                             ),
                         )

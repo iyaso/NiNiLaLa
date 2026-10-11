@@ -7,446 +7,108 @@
 <title>NiNi LaLa</title>
 <style>
   html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
-  video { width: 100%; height: 100%; object-fit: contain; display: block; }
+  video { width: 100%; height: 100%; object-fit: contain; display: block; background: #000; }
   #msg {
     position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
     color: #9a9a9a; font: 16px/1.5 system-ui, sans-serif; text-align: center;
-    padding: 24px; background: #000;
+    padding: 24px; pointer-events: none;
+  }
+  #sound {
+    position: fixed; right: 16px; bottom: 16px;
+    border: 0; border-radius: 999px; padding: 10px 16px;
+    font: 14px system-ui, sans-serif; background: #fff; color: #111;
   }
 </style>
 </head>
 <body>
 <video id="v" muted playsinline autoplay></video>
 <div id="msg">Connecting…</div>
-<noscript>This page needs JavaScript enabled.</noscript>
+<button id="sound" type="button">Sound on</button>
+<script src="jmuxer.min.js"></script>
 <script>
 (() => {
   const video = document.getElementById('v');
   const msg = document.getElementById('msg');
+  const sound = document.getElementById('sound');
+  let player = null;
+  let stopped = false;
 
-  if (!('MediaSource' in window)) {
-    show('This browser can’t play the stream.\nPlease use a recent Chrome, Edge, Firefox or Safari.');
-    return;
-  }
-
-  const TIMESCALE = 90000;
-  const FRAME_DURATION = 3000; // 30fps
-
-  const AV = {
-    controller: null, ms: null, sb: null, url: null,
-    sps: null, pps: null, initBuilt: false,
-    tfdt: 0, seq: 1,
-    pending: [], appending: false,
-    buf: new Uint8Array(0),
-    lastData: 0, stopped: false, started: false,
+  sound.onclick = () => {
+    video.muted = !video.muted;
+    sound.textContent = video.muted ? 'Sound on' : 'Mute';
+    video.play().catch(() => {});
   };
-  let reconnectTimer = 0;
 
-  function show(text) {
-    msg.innerText = text;
+  function fail(text) {
+    if (stopped) return;
+    msg.textContent = text;
     msg.style.display = 'flex';
-  }
-  function hideMsg() { msg.style.display = 'none'; }
-
-  // ---- byte helpers ----
-  const concat = (...arrs) => {
-    const out = new Uint8Array(arrs.reduce((n, a) => n + a.length, 0));
-    let o = 0;
-    for (const a of arrs) { out.set(a, o); o += a.length; }
-    return out;
-  };
-  const bytes = (...vals) => Uint8Array.from(vals);
-  const u16 = (v) => Uint8Array.from([(v >> 8) & 0xff, v & 0xff]);
-  const u32 = (v) => {
-    const a = new Uint8Array(4);
-    new DataView(a.buffer).setUint32(0, v >>> 0);
-    return a;
-  };
-  const fourcc = (s) => Uint8Array.from([...s].map((c) => c.charCodeAt(0)));
-  const box = (t, ...parts) => {
-    const body = concat(...parts);
-    const out = new Uint8Array(8 + body.length);
-    new DataView(out.buffer).setUint32(0, out.length);
-    out.set(fourcc(t), 4);
-    out.set(body, 8);
-    return out;
-  };
-  const fullBox = (t, ver, flags, ...parts) =>
-    box(t, bytes(ver), bytes((flags >> 16) & 0xff, (flags >> 8) & 0xff, flags & 0xff), ...parts);
-
-  const MATRIX = concat(
-    u32(0x00010000), u32(0), u32(0),
-    u32(0), u32(0x00010000), u32(0),
-    u32(0), u32(0), u32(0x40000000),
-  );
-
-  const buildAvcC = (sps, pps) => box('avcC',
-    bytes(0x01, sps[1], sps[2], sps[3], 0xff, 0xe1),
-    u16(sps.length), sps,
-    bytes(1),
-    u16(pps.length), pps,
-  );
-
-  // ---- SPS parsing (coded dimensions for tkhd/avc1) ----
-  function parseSpsSize(sps) {
-    try {
-      const rbsp = [];
-      for (let i = 1; i < sps.length; i++) {
-        if (sps[i] === 0 && sps[i + 1] === 0 && sps[i + 2] === 3) {
-          rbsp.push(0, 0);
-          i += 2;
-        } else {
-          rbsp.push(sps[i]);
-        }
-      }
-      let pos = 0;
-      const bit = () => {
-        if ((pos >> 3) >= rbsp.length) throw new Error('sps eof');
-        const b = (rbsp[pos >> 3] >> (7 - (pos & 7))) & 1;
-        pos++;
-        return b;
-      };
-      const u = (n) => { let v = 0; for (let i = 0; i < n; i++) v = v * 2 + bit(); return v; };
-      const ue = () => {
-        let z = 0;
-        while (!bit()) if (++z > 31) throw new Error('sps bad ue');
-        return (1 << z) - 1 + u(z);
-      };
-      const profile = u(8);
-      u(8); u(8);
-      ue();
-      if ([100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135].includes(profile)) {
-        const chroma = ue();
-        if (chroma === 3) u(1);
-        ue(); ue();
-        u(1);
-        if (u(1)) throw new Error('sps scaling lists unsupported');
-      }
-      ue();
-      const pocType = ue();
-      if (pocType === 0) {
-        ue();
-      } else if (pocType === 1) {
-        u(1); ue(); ue();
-        const n = ue();
-        for (let i = 0; i < n; i++) ue();
-      }
-      ue();
-      u(1);
-      const wMbs = ue() + 1;
-      const hMap = ue() + 1;
-      const frameMbsOnly = u(1);
-      if (!frameMbsOnly) u(1);
-      u(1);
-      let width = wMbs * 16;
-      let height = (2 - frameMbsOnly) * hMap * 16;
-      if (u(1)) {
-        const cropUnitY = 2 * (2 - frameMbsOnly);
-        width -= (ue() + ue()) * 2;
-        height -= (ue() + ue()) * cropUnitY;
-      }
-      return width > 0 && height > 0 ? { width, height } : null;
-    } catch (e) {
-      return null;
-    }
-  }
-
-  const hex2 = (v) => v.toString(16).padStart(2, '0').toUpperCase();
-  const codec4cc = () => 'avc1.' + hex2(AV.sps[1]) + hex2(AV.sps[2]) + hex2(AV.sps[3]);
-
-  // ---- fMP4 muxer ----
-  function buildInitSegment() {
-    const size = parseSpsSize(AV.sps) || { width: 1280, height: 720 };
-    const { width: w, height: h } = size;
-    return concat(
-      box('ftyp', fourcc('isom'), u32(0), fourcc('isom'), fourcc('iso2'), fourcc('avc1'), fourcc('mp41')),
-      box('moov',
-        fullBox('mvhd', 0, 0,
-          u32(0), u32(0), u32(TIMESCALE), u32(0),
-          u32(0x00010000), u16(0x0100), u16(0),
-          u32(0), u32(0),
-          MATRIX,
-          u32(0), u32(0), u32(0), u32(0), u32(0), u32(0),
-          u32(2)),
-        box('trak',
-          fullBox('tkhd', 0, 3,
-            u32(0), u32(0), u32(1), u32(0), u32(0),
-            u32(0), u32(0),
-            u16(0), u16(0), u16(0), u16(0),
-            MATRIX,
-            u32(w << 16), u32(h << 16)),
-          box('mdia',
-            fullBox('mdhd', 0, 0,
-              u32(0), u32(0), u32(TIMESCALE), u32(0), u16(0x55c4), u16(0)),
-            fullBox('hdlr', 0, 0,
-              u32(0), fourcc('vide'), u32(0), u32(0), u32(0),
-              bytes(...[...'VideoHandler'].map((c) => c.charCodeAt(0)), 0)),
-            box('minf',
-              fullBox('vmhd', 0, 1, u16(0), u16(0), u16(0), u16(0)),
-              box('dinf',
-                fullBox('dref', 0, 0, u32(1), fullBox('url ', 0, 1))),
-              box('stbl',
-                fullBox('stsd', 0, 0, u32(1),
-                  box('avc1',
-                    bytes(0, 0, 0, 0, 0, 0), u16(1),
-                    u16(0), u16(0),
-                    u32(0), u32(0), u32(0),
-                    u16(w), u16(h),
-                    u32(0x00480000), u32(0x00480000),
-                    u32(0),
-                    u16(1),
-                    new Uint8Array(32),
-                    u16(0x0018), u16(0xffff),
-                    buildAvcC(AV.sps, AV.pps))),
-                fullBox('stts', 0, 0, u32(0)),
-                fullBox('stsc', 0, 0, u32(0)),
-                fullBox('stsz', 0, 0, u32(0), u32(0)),
-                fullBox('stco', 0, 0, u32(0)))))),
-        box('mvex',
-          fullBox('trex', 0, 0, u32(1), u32(1), u32(FRAME_DURATION), u32(0), u32(0)))),
-    );
-  }
-
-  function buildMediaSegment(isKey, payload) {
-    const seq = AV.seq++;
-    const base = AV.tfdt;
-    AV.tfdt += FRAME_DURATION;
-    const build = (dataOffset) => concat(
-      box('moof',
-        fullBox('mfhd', 0, 0, u32(seq)),
-        box('traf',
-          fullBox('tfhd', 0, 0x020000, u32(1)),
-          fullBox('tfdt', 1, 0, u32(0), u32(base)),
-          fullBox('trun', 0, 0x000701, u32(1),
-            u32(dataOffset), u32(FRAME_DURATION), u32(payload.length),
-            u32(isKey ? 0x02000000 : 0x01010000)))),
-      box('mdat', payload),
-    );
-    // data_offset is relative to the moof start: moof length + 8-byte mdat header
-    return build(build(0).length - payload.length);
-  }
-
-  // ---- chunk processing ----
-  function splitNals(data) {
-    const nals = [];
-    const n = data.length;
-    let start = -1;
-    let i = 0;
-    while (i < n) {
-      if (i <= n - 3 && data[i] === 0 && data[i + 1] === 0) {
-        let scLen = 0;
-        if (data[i + 2] === 1) scLen = 3;
-        else if (i <= n - 4 && data[i + 2] === 0 && data[i + 3] === 1) scLen = 4;
-        if (scLen > 0) {
-          if (start >= 0 && i > start) nals.push(stripNal(data, start, i));
-          start = i;
-          i += scLen;
-          continue;
-        }
-      }
-      i++;
-    }
-    if (start >= 0 && n > start) nals.push(stripNal(data, start, n));
-    return nals;
-  }
-
-  function stripNal(data, from, to) {
-    const head = to - from >= 4 && data[from + 2] === 0 && data[from + 3] === 1 ? 4 : 3;
-    return data.slice(from + head, to);
-  }
-
-  function processChunk(chunk) {
-    let sps = null, pps = null, hasIdr = false;
-    const slices = [];
-    for (const nal of splitNals(chunk)) {
-      const t = nal[0] & 0x1f;
-      if (t === 7) sps = nal;
-      else if (t === 8) pps = nal;
-      else if (t === 5) { hasIdr = true; slices.push(nal); }
-      else if (t === 1) slices.push(nal);
-    }
-    if (sps) AV.sps = sps;
-    if (pps) AV.pps = pps;
-    if (!AV.initBuilt && AV.sps && AV.pps) {
-      AV.initBuilt = true;
-      AV.pending.push(buildInitSegment());
-      ensureSource();
-    }
-    if (!slices.length || !AV.initBuilt) return;
-    const payload = new Uint8Array(slices.reduce((n, s) => n + 4 + s.length, 0));
-    let o = 0;
-    for (const s of slices) {
-      new DataView(payload.buffer).setUint32(o, s.length);
-      payload.set(s, o + 4);
-      o += 4 + s.length;
-    }
-    AV.pending.push(buildMediaSegment(hasIdr, payload));
-    tryPump();
-  }
-
-  // ---- MediaSource plumbing ----
-  async function ensureSource() {
-    if (AV.sb) return;
-    let type = 'video/mp4; codecs="' + codec4cc() + '"';
-    if (!MediaSource.isTypeSupported(type)) type = 'video/mp4; codecs="avc1.42E01E"';
-    if (!MediaSource.isTypeSupported(type)) {
-      show('This browser cannot play H.264 in MediaSource.');
-      return;
-    }
-    const ms = new MediaSource();
-    AV.ms = ms;
-    AV.url = URL.createObjectURL(ms);
-    const opened = new Promise((resolve) => ms.addEventListener('sourceopen', resolve, { once: true }));
-    video.src = AV.url;
-    video.load();
-    await opened;
-    if (AV.ms !== ms) return;
-    const sb = ms.addSourceBuffer(type);
-    AV.sb = sb;
-    sb.addEventListener('updateend', () => {
-      AV.appending = false;
-      pumpDone();
-    });
-    sb.addEventListener('error', () => reconnect());
-    tryPump();
-  }
-
-  function tryPump() {
-    if (!AV.sb || AV.appending || AV.sb.updating || !AV.pending.length) return;
-    const seg = AV.pending.shift();
-    AV.appending = true;
-    try {
-      AV.sb.appendBuffer(seg);
-    } catch (e) {
-      AV.appending = false;
-      console.error('append failed', e);
-      reconnect();
-    }
-  }
-
-  function pumpDone() {
-    if (!AV.started && AV.sb && AV.sb.buffered.length && video.readyState >= 3) {
-      AV.started = true;
-      hideMsg();
-      video.play().catch(() => {});
-    }
-    trim();
-    tryPump();
-  }
-
-  function trim() {
-    if (!AV.sb || AV.sb.updating || AV.pending.length || !AV.started) return;
-    const b = AV.sb.buffered;
-    if (!b.length) return;
-    if (b.end(b.length - 1) - video.currentTime > 12 && video.currentTime > 8) {
-      try { AV.sb.remove(0, video.currentTime - 8); } catch (e) {}
-    }
-  }
-
-  // ---- connection ----
-  function appendChunk(u8) {
-    const n = new Uint8Array(AV.buf.length + u8.length);
-    n.set(AV.buf);
-    n.set(u8, AV.buf.length);
-    AV.buf = n;
-  }
-
-  function parseMessages() {
-    let buf = AV.buf;
-    while (buf.length >= 4) {
-      const len = ((buf[0] << 24) | (buf[1] << 16) | (buf[2] << 8) | buf[3]) >>> 0;
-      if (len === 0 || len > 8 * 1024 * 1024) throw new Error('bad frame length ' + len);
-      if (buf.length < 4 + len) break;
-      processChunk(buf.slice(4, 4 + len));
-      buf = buf.slice(4 + len);
-    }
-    AV.buf = buf;
-  }
-
-  function resetConnection() {
-    clearTimeout(reconnectTimer);
-    if (AV.controller) { try { AV.controller.abort(); } catch (e) {} }
-    AV.controller = null;
-    if (AV.sb) {
-      try { AV.sb.abort(); } catch (e) {}
-      AV.sb = null;
-    }
-    if (AV.url) URL.revokeObjectURL(AV.url);
-    AV.url = null;
-    AV.ms = null;
-    video.removeAttribute('src');
-    try { video.load(); } catch (e) {}
-    AV.sps = null;
-    AV.pps = null;
-    AV.initBuilt = false;
-    AV.tfdt = 0;
-    AV.seq = 1;
-    AV.pending = [];
-    AV.appending = false;
-    AV.started = false;
-    AV.buf = new Uint8Array(0);
-  }
-
-  function reconnect() {
-    if (AV.stopped) return;
-    resetConnection();
-    reconnectTimer = setTimeout(run, 1000);
+    try { player && player.destroy(); } catch (e) {}
+    player = null;
+    setTimeout(run, 1000);
   }
 
   async function run() {
-    if (AV.stopped) return;
-    show('Connecting…');
-    const myController = new AbortController();
-    AV.controller = myController;
-    AV.lastData = performance.now();
+    if (stopped) return;
+    msg.textContent = 'Connecting…';
+    msg.style.display = 'flex';
+    let mode = 'video';
     try {
-      const res = await fetch('/stream.h264', {
-        signal: myController.signal,
-        cache: 'no-store',
-      });
-      if (!res.ok || !res.body) throw new Error('HTTP ' + res.status);
-      const reader = res.body.getReader();
-      show('Waiting for picture…');
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        AV.lastData = performance.now();
-        appendChunk(value);
-        parseMessages();
-      }
-      throw new Error('stream ended');
-    } catch (e) {
-      if (AV.stopped || AV.controller !== myController) return;
-      console.warn('stream interrupted', e);
-      show('Reconnecting…');
+      const status = await (await fetch('/status')).json();
+      if (status.audio) mode = 'both';
+    } catch (e) {}
+
+    if (typeof JMuxer === 'undefined') {
+      fail('Player failed to load');
+      return;
     }
-    reconnect();
+    player = new JMuxer({
+      node: video,
+      mode,
+      flushingTime: 100,
+      fps: 30,
+      clearBuffer: true,
+      onError: () => fail('Reconnecting…'),
+    });
+
+    let res;
+    try { res = await fetch('/stream'); } catch (e) { return fail('Reconnecting…'); }
+    if (!res.ok || !res.body) return fail('Reconnecting…');
+
+    const reader = res.body.getReader();
+    let buf = new Uint8Array(0);
+    let saw = false;
+    try {
+      while (!stopped) {
+        const { done, value } = await reader.read();
+        if (done) return fail('Reconnecting…');
+        const next = new Uint8Array(buf.length + value.length);
+        next.set(buf);
+        next.set(value, buf.length);
+        buf = next;
+        while (buf.length >= 5) {
+          const len = new DataView(buf.buffer, buf.byteOffset, buf.byteLength).getUint32(1);
+          if (len > 2_000_000) return fail('Reconnecting…');
+          if (buf.length < 5 + len) break;
+          const type = buf[0];
+          const payload = buf.slice(5, 5 + len);
+          buf = buf.subarray(5 + len);
+          if (type === 1) player.feed({ video: payload });
+          else if (type === 2) player.feed({ audio: payload });
+          if (!saw) {
+            saw = true;
+            msg.style.display = 'none';
+            video.play().catch(() => {});
+          }
+        }
+        if (buf.byteOffset > 0) buf = buf.slice();
+      }
+    } catch (e) {
+      fail('Reconnecting…');
+    }
   }
 
-  setInterval(() => {
-    if (!AV.stopped && AV.lastData && performance.now() - AV.lastData > 6000) {
-      reconnect();
-    }
-  }, 2000);
-
-  // stay near the live edge if the tab ever falls behind
-  setInterval(() => {
-    if (AV.started && AV.sb && AV.sb.buffered.length && !video.seeking) {
-      const end = AV.sb.buffered.end(AV.sb.buffered.length - 1);
-      if (end - video.currentTime > 2) video.currentTime = end - 0.5;
-    }
-  }, 1000);
-
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden) {
-      AV.stopped = true;
-      resetConnection();
-    } else {
-      AV.stopped = false;
-      reconnect();
-    }
-  });
-
+  window.addEventListener('pagehide', () => { stopped = true; });
   run();
 })();
 </script>

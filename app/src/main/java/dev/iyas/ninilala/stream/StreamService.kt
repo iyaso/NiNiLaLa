@@ -1,5 +1,6 @@
 package dev.iyas.ninilala.stream
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
@@ -7,6 +8,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.media.MediaCodec
 import android.os.IBinder
@@ -14,12 +16,14 @@ import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleService
 import com.pedro.common.AudioCodec
 import com.pedro.common.ConnectChecker
 import com.pedro.common.VideoCodec
 import com.pedro.encoder.input.video.CameraHelper
 import com.pedro.library.base.Camera2Base
+import com.pedro.library.view.GlStreamInterface
 import com.pedro.rtspserver.server.RtspServer
 import com.pedro.rtspserver.util.RtspServerStreamClient
 import dev.iyas.ninilala.MainActivity
@@ -37,6 +41,11 @@ class StreamService : LifecycleService() {
     private var webServer: StreamWebServer? = null
     private var advertiser: NsdAdvertiser? = null
     private var isStopping = false
+    private var rtspViewers = 0
+
+    private fun publishViewers() {
+        _viewerConnected.value = rtspViewers > 0 || (webServer?.viewerCount() ?: 0) > 0
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -69,13 +78,11 @@ class StreamService : LifecycleService() {
         if (rtspCamera != null) return
 
         ensureChannel()
-        val notification = buildNotification()
-        ServiceCompat.startForeground(
-            this,
-            NOTIFICATION_ID,
-            notification,
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA,
-        )
+        val mic = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        val types = ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or
+            if (mic) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else 0
+        ServiceCompat.startForeground(this, NOTIFICATION_ID, buildNotification(), types)
 
         val powerManager = getSystemService(PowerManager::class.java)
         wakeLock = powerManager.newWakeLock(
@@ -86,7 +93,8 @@ class StreamService : LifecycleService() {
         val connectChecker = object : ConnectChecker {
             override fun onConnectionStarted(url: String) {
                 Log.i(tag, "RTSP client connected: $url")
-                _viewerConnected.value = true
+                rtspViewers++
+                publishViewers()
             }
 
             override fun onConnectionSuccess() {
@@ -95,12 +103,14 @@ class StreamService : LifecycleService() {
 
             override fun onConnectionFailed(reason: String) {
                 Log.e(tag, "RTSP connection failed: $reason")
-                _viewerConnected.value = false
+                rtspViewers = (rtspViewers - 1).coerceAtLeast(0)
+                publishViewers()
             }
 
             override fun onDisconnect() {
                 Log.i(tag, "RTSP client disconnected")
-                _viewerConnected.value = false
+                rtspViewers = (rtspViewers - 1).coerceAtLeast(0)
+                publishViewers()
             }
 
             override fun onAuthError() {
@@ -114,17 +124,23 @@ class StreamService : LifecycleService() {
 
         try {
             val web = StreamWebServer(this).also { webServer = it }
-            web.onViewerCountChanged = { count -> _viewerConnected.value = count > 0 }
+            web.onViewerCountChanged = { publishViewers() }
             if (web.startServer()) {
                 _webUrl.value = StreamWebServer.findLanUrl()
             }
 
-            val camera = WebTappedRtspCamera(this, connectChecker, RTSP_PORT, web).apply {
-                // 5th arg is rotation: 90 = portrait, 0 = landscape. Wrong value streams rotated video.
-                prepareVideo(1280, 720, 30, 2_000_000, CameraHelper.getCameraOrientation(this@StreamService))
-                prepareAudio(44100, 64 * 1024, false)
-                startStream()
+            val camera = WebTappedRtspCamera(this, connectChecker, RTSP_PORT, web)
+            (camera.glInterface as? GlStreamInterface)?.autoHandleOrientation = true
+            val videoOk = camera.prepareVideo(
+                1280, 720, 30, 2_000_000,
+                CameraHelper.getCameraOrientation(this),
+            )
+            if (!videoOk) error("camera failed to prepare")
+            if (mic) {
+                val audioOk = camera.prepareAudio(44100, 64 * 1024, false)
+                if (!audioOk) Log.w(tag, "microphone failed to prepare; streaming video only")
             }
+            camera.startStream()
 
             if (useFront) {
                 runCatching { camera.switchCamera() }
@@ -157,6 +173,7 @@ class StreamService : LifecycleService() {
         runCatching { advertiser?.unregister() }
         advertiser = null
         
+        rtspViewers = 0
         _viewerConnected.value = false
         wakeLock?.let { lock ->
             if (lock.isHeld) lock.release()
@@ -226,6 +243,7 @@ class StreamService : LifecycleService() {
 
         override fun onAudioInfoImp(isStereo: Boolean, sampleRate: Int) {
             rtspServer.setAudioInfo(sampleRate, isStereo)
+            web.setAudio(sampleRate, isStereo)
         }
 
         override fun startStreamImp(url: String) {
@@ -237,17 +255,18 @@ class StreamService : LifecycleService() {
         }
 
         override fun getAudioDataImp(audioBuffer: ByteBuffer, info: MediaCodec.BufferInfo) {
-            rtspServer.sendAudio(audioBuffer, info)
+            rtspServer.sendAudio(audioBuffer.duplicate(), info)
+            web.publishAudio(audioBuffer.duplicate(), info)
         }
 
         override fun onVideoInfoImp(sps: ByteBuffer, pps: ByteBuffer?, vps: ByteBuffer?) {
             rtspServer.setVideoInfo(sps.duplicate(), pps?.duplicate(), vps?.duplicate())
-            web.setConfig(sps, pps)
+            web.setVideoHeader(annexB(sps) + annexB(pps))
         }
 
         override fun getVideoDataImp(videoBuffer: ByteBuffer, info: MediaCodec.BufferInfo) {
-            rtspServer.sendVideo(videoBuffer, info)
-            web.publish(videoBuffer, info)
+            rtspServer.sendVideo(videoBuffer.duplicate(), info)
+            web.publishVideo(videoBuffer.duplicate(), info)
         }
 
         override fun getStreamClient(): RtspServerStreamClient = RtspServerStreamClient(rtspServer)

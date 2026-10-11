@@ -16,15 +16,10 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * Serves the running camera stream to LAN browsers on [WEB_PORT]:
- *  - GET /           → the MSE player page (assets/web/index.html)
- *  - GET /stream.h264 → endless chunked body of [4-byte BE length][Annex-B chunk] messages,
- *    where each chunk is either the config (SPS+PPS) or one complete video frame
- *
- * Frames are tapped from the encoder thread; slow clients get disconnected instead
- * of ever blocking the encoder.
+ * Serves the browser player and a length-prefixed H.264 + AAC stream.
+ * jMuxer on the page turns those frames into MSE media; no MPEG-TS muxer.
  */
-class StreamWebServer(private val context: Context) : NanoHTTPD(WEB_PORT) {
+class StreamWebServer(private val context: Context) : NanoHTTPD("0.0.0.0", WEB_PORT) {
 
     private val running = AtomicBoolean(false)
     private val clients = ConcurrentHashMap<Long, Client>()
@@ -32,177 +27,176 @@ class StreamWebServer(private val context: Context) : NanoHTTPD(WEB_PORT) {
 
     var onViewerCountChanged: ((Int) -> Unit)? = null
 
-    @Volatile
-    private var spsNal: ByteArray? = null
-
-    @Volatile
-    private var ppsNal: ByteArray? = null
+    @Volatile var audioEnabled: Boolean = false
+    @Volatile private var sampleRate: Int = 44100
+    @Volatile private var stereo: Boolean = false
+    @Volatile private var avcHeader: ByteArray = ByteArray(0)
 
     private val indexHtml: ByteArray by lazy {
         context.assets.open("web/index.html").use { it.readBytes() }
     }
+    private val jmuxerJs: ByteArray by lazy {
+        context.assets.open("web/jmuxer.min.js").use { it.readBytes() }
+    }
 
     fun startServer(): Boolean = try {
-        start()
+        start(SOCKET_READ_TIMEOUT, false)
         running.set(true)
-        Log.i(TAG, "web viewer server on port $WEB_PORT")
+        Log.i(TAG, "web viewer on port $WEB_PORT")
         true
     } catch (e: Exception) {
-        Log.e(TAG, "failed to start web viewer server", e)
+        Log.e(TAG, "web viewer failed to start", e)
         false
     }
 
     fun stopServer() {
         running.set(false)
         clients.values.forEach { it.dead.set(true) }
-        try {
-            stop()
-        } catch (e: Exception) {
-            Log.w(TAG, "web server stop failed", e)
-        }
+        runCatching { stop() }
         clients.clear()
         onViewerCountChanged?.invoke(0)
     }
 
-    fun setConfig(sps: ByteBuffer, pps: ByteBuffer?) {
-        val spsBytes = stripStartCode(duplicateBytes(sps))
-        val ppsBytes = pps?.let { stripStartCode(duplicateBytes(it)) } ?: return
-        if (spsBytes.isEmpty() || ppsBytes.isEmpty()) return
-        spsNal = spsBytes
-        ppsNal = ppsBytes
-        val config = configChunk() ?: return
-        for (client in clients.values) {
-            if (!client.dead.get()) enqueue(client, config)
-        }
+    fun viewerCount(): Int = clients.size
+
+    fun setAudio(sampleRate: Int, stereo: Boolean) {
+        this.sampleRate = sampleRate
+        this.stereo = stereo
+        audioEnabled = true
     }
 
-    fun publish(videoBuffer: ByteBuffer, info: MediaCodec.BufferInfo) {
+    fun setVideoHeader(header: ByteArray) {
+        avcHeader = header
+    }
+
+    fun publishVideo(buffer: ByteBuffer, info: MediaCodec.BufferInfo) {
         if (!running.get() || info.size <= 0) return
-        val dup = videoBuffer.duplicate()
-        val data = ByteArray(info.size)
-        dup.position(info.offset)
-        dup.limit(info.offset + info.size)
-        dup.get(data)
-
-        var hasIdr = false
-        var hasSlice = false
-        for (nal in splitNals(data)) {
-            when (nal[0].toInt() and 0x1f) {
-                NAL_SPS -> spsNal = nal
-                NAL_PPS -> ppsNal = nal
-                NAL_IDR -> hasIdr = true
-                NAL_SLICE -> hasSlice = true
-            }
+        if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) return
+        var data = copy(buffer, info)
+        val header = avcHeader
+        if (info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0 && header.isNotEmpty()) {
+            data = header + data
         }
-        if (!hasIdr && !hasSlice) return
+        broadcast(VIDEO, data)
+    }
 
-        for (client in clients.values) {
-            if (client.dead.get()) continue
-            if (hasIdr) client.sawIdr.set(true)
-            if (!hasIdr && !client.sawIdr.get()) continue
-            enqueue(client, data)
-        }
+    fun publishAudio(buffer: ByteBuffer, info: MediaCodec.BufferInfo) {
+        if (!running.get() || !audioEnabled || info.size <= 0) return
+        val aac = copy(buffer, info)
+        broadcast(AUDIO, adts(aac) + aac)
     }
 
     override fun serve(session: IHTTPSession): Response = when (session.uri) {
-        "/", "/index.html" -> newFixedLengthResponse(
-            NanoHTTPD.Response.Status.OK,
-            "text/html; charset=utf-8",
-            ByteArrayInputStream(indexHtml),
-            indexHtml.size.toLong(),
-        ).apply {
-            addHeader("Cache-Control", "no-store")
-        }
-        "/stream.h264" -> serveStream()
-        else -> newFixedLengthResponse(NanoHTTPD.Response.Status.NOT_FOUND, NanoHTTPD.MIME_PLAINTEXT, "not found")
+        "/", "/index.html" -> bytes(indexHtml, "text/html; charset=utf-8", cache = false)
+        "/jmuxer.min.js" -> bytes(jmuxerJs, "application/javascript", cache = true)
+        "/status" -> newFixedLengthResponse(
+            Response.Status.OK,
+            "application/json",
+            """{"audio":$audioEnabled}""",
+        )
+        "/stream" -> serveStream()
+        else -> newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "not found")
     }
+
+    private fun bytes(body: ByteArray, mime: String, cache: Boolean): Response =
+        newFixedLengthResponse(Response.Status.OK, mime, ByteArrayInputStream(body), body.size.toLong()).apply {
+            addHeader("Cache-Control", if (cache) "public, max-age=86400" else "no-store")
+        }
 
     private fun serveStream(): Response {
         val client = Client(nextClientId.getAndIncrement())
-        register(client)
-        Log.i(TAG, "web viewer #${client.id} connected (${clients.size} active)")
-        return newChunkedResponse(
-            NanoHTTPD.Response.Status.OK,
-            "application/octet-stream",
-            ClientStream(client),
-        ).apply {
+        clients[client.id] = client
+        onViewerCountChanged?.invoke(clients.size)
+        Log.i(TAG, "viewer #${client.id} connected (${clients.size})")
+        return newChunkedResponse(Response.Status.OK, "application/octet-stream", ClientStream(client)).apply {
             addHeader("Cache-Control", "no-store")
         }
     }
 
-    private fun register(client: Client) {
-        clients[client.id] = client
-        configChunk()?.let { enqueue(client, it) }
-        onViewerCountChanged?.invoke(clients.size)
+    private fun broadcast(type: Byte, payload: ByteArray) {
+        val frame = ByteArray(5 + payload.size)
+        frame[0] = type
+        val n = payload.size
+        frame[1] = (n ushr 24).toByte()
+        frame[2] = (n ushr 16).toByte()
+        frame[3] = (n ushr 8).toByte()
+        frame[4] = n.toByte()
+        payload.copyInto(frame, 5)
+        for (client in clients.values) {
+            if (client.dead.get()) continue
+            if (!client.queue.offer(frame)) {
+                client.dead.set(true)
+                Log.i(TAG, "dropped slow viewer #${client.id}")
+            }
+        }
     }
 
-    private fun configChunk(): ByteArray? {
-        val sps = spsNal ?: return null
-        val pps = ppsNal ?: return null
-        return START_CODE + sps + START_CODE + pps
+    private fun copy(buffer: ByteBuffer, info: MediaCodec.BufferInfo): ByteArray {
+        val dup = buffer.duplicate()
+        dup.position(info.offset)
+        dup.limit(info.offset + info.size)
+        return ByteArray(dup.remaining()).also { dup.get(it) }
+    }
+
+    private fun adts(aac: ByteArray): ByteArray {
+        val freq = when (sampleRate) {
+            96000 -> 0; 88200 -> 1; 64000 -> 2; 48000 -> 3
+            44100 -> 4; 32000 -> 5; 24000 -> 6; 22050 -> 7
+            16000 -> 8; 12000 -> 9; 11025 -> 10; 8000 -> 11
+            else -> 4
+        }
+        val channels = if (stereo) 2 else 1
+        val len = aac.size + 7
+        return byteArrayOf(
+            0xFF.toByte(),
+            0xF1.toByte(),
+            ((1 shl 6) or (freq shl 2) or (channels shr 2)).toByte(),
+            (((channels and 3) shl 6) or ((len shr 11) and 3)).toByte(),
+            ((len shr 3) and 0xFF).toByte(),
+            (((len and 7) shl 5) or 0x1F).toByte(),
+            0xFC.toByte(),
+        )
     }
 
     private fun unregister(client: Client) {
         if (clients.remove(client.id) != null) {
-            Log.i(TAG, "web viewer #${client.id} disconnected (${clients.size} active)")
+            Log.i(TAG, "viewer #${client.id} left (${clients.size})")
             onViewerCountChanged?.invoke(clients.size)
-        }
-    }
-
-    private fun enqueue(client: Client, nal: ByteArray) {
-        if (client.dead.get()) return
-        if (!client.queue.offer(nal)) {
-            client.dead.set(true)
-            Log.i(TAG, "dropped slow web viewer #${client.id}")
         }
     }
 
     private class Client(val id: Long) {
         val queue = ArrayBlockingQueue<ByteArray>(QUEUE_CAPACITY)
-        val sawIdr = AtomicBoolean(false)
         val dead = AtomicBoolean(false)
     }
 
     private inner class ClientStream(private val client: Client) : InputStream() {
         private var current: ByteArray? = null
         private var pos = 0
-        private var closed = false
 
-        @Synchronized
         override fun read(buffer: ByteArray, off: Int, len: Int): Int {
             if (len == 0) return 0
             while (true) {
-                if (closed || client.dead.get() || !running.get()) {
-                    closeQuietly()
+                if (client.dead.get() || !running.get()) {
+                    unregister(client)
                     return -1
                 }
                 var cur = current
                 if (cur == null) {
-                    val nal = try {
+                    cur = try {
                         client.queue.poll(1, TimeUnit.SECONDS) ?: continue
                     } catch (e: InterruptedException) {
                         Thread.currentThread().interrupt()
-                        closeQuietly()
+                        unregister(client)
                         return -1
                     }
-                    // wire format: [4-byte BE length][raw NAL] — framed here, off the encoder thread
-                    val framed = ByteArray(4 + nal.size)
-                    framed[0] = (nal.size ushr 24).toByte()
-                    framed[1] = (nal.size ushr 16).toByte()
-                    framed[2] = (nal.size ushr 8).toByte()
-                    framed[3] = nal.size.toByte()
-                    nal.copyInto(framed, 4)
-                    cur = framed
                     current = cur
                     pos = 0
                 }
                 val n = minOf(cur.size - pos, len)
                 System.arraycopy(cur, pos, buffer, off, n)
                 pos += n
-                if (pos >= cur.size) {
-                    current = null
-                    pos = 0
-                }
+                if (pos >= cur.size) current = null
                 return n
             }
         }
@@ -212,30 +206,19 @@ class StreamWebServer(private val context: Context) : NanoHTTPD(WEB_PORT) {
             return if (read(one, 0, 1) == -1) -1 else one[0].toInt() and 0xff
         }
 
-        @Synchronized
         override fun close() {
-            closeQuietly()
-        }
-
-        private fun closeQuietly() {
-            if (!closed) {
-                closed = true
-                unregister(client)
-            }
+            client.dead.set(true)
+            unregister(client)
         }
     }
 
     companion object {
         private const val TAG = "StreamWebServer"
         const val WEB_PORT = 8080
-        private const val QUEUE_CAPACITY = 64
-        private const val NAL_SPS = 7
-        private const val NAL_PPS = 8
-        private const val NAL_IDR = 5
-        private const val NAL_SLICE = 1
-        private const val ZERO: Byte = 0
-        private const val ONE: Byte = 1
-        private val START_CODE = byteArrayOf(0, 0, 0, 1)
+        private const val QUEUE_CAPACITY = 90
+        private const val SOCKET_READ_TIMEOUT = 10_000
+        private const val VIDEO: Byte = 1
+        private const val AUDIO: Byte = 2
 
         fun findLanUrl(): String? {
             val wlan = ArrayList<String>()
@@ -258,50 +241,17 @@ class StreamWebServer(private val context: Context) : NanoHTTPD(WEB_PORT) {
                 ?: other.firstOrNull()
             return ip?.let { "http://$it:$WEB_PORT/" }
         }
-
-        private fun duplicateBytes(buffer: ByteBuffer): ByteArray {
-            val dup = buffer.duplicate()
-            return ByteArray(dup.remaining()).also { dup.get(it) }
-        }
-
-        private fun stripStartCode(bytes: ByteArray): ByteArray {
-            if (bytes.size >= 4 && bytes[0] == ZERO && bytes[1] == ZERO && bytes[2] == ZERO && bytes[3] == ONE) {
-                return bytes.copyOfRange(4, bytes.size)
-            }
-            if (bytes.size >= 3 && bytes[0] == ZERO && bytes[1] == ZERO && bytes[2] == ONE) {
-                return bytes.copyOfRange(3, bytes.size)
-            }
-            return bytes
-        }
-
-        private fun splitNals(data: ByteArray): List<ByteArray> {
-            val nals = ArrayList<ByteArray>(4)
-            val n = data.size
-            var start = -1
-            var i = 0
-            while (i < n) {
-                if (i <= n - 3 && data[i] == ZERO && data[i + 1] == ZERO) {
-                    val scLen = when {
-                        data[i + 2] == ONE -> 3
-                        i <= n - 4 && data[i + 2] == ZERO && data[i + 3] == ONE -> 4
-                        else -> 0
-                    }
-                    if (scLen > 0) {
-                        if (start >= 0 && i > start) nals.add(strip(data, start, i))
-                        start = i
-                        i += scLen
-                        continue
-                    }
-                }
-                i++
-            }
-            if (start >= 0 && n > start) nals.add(strip(data, start, n))
-            return nals
-        }
-
-        private fun strip(data: ByteArray, from: Int, to: Int): ByteArray {
-            val head = if (to - from >= 4 && data[from + 2] == ZERO && data[from + 3] == ONE) 4 else 3
-            return data.copyOfRange(from + head, to)
-        }
     }
+}
+
+internal fun annexB(buffer: ByteBuffer?): ByteArray {
+    if (buffer == null) return ByteArray(0)
+    val dup = buffer.duplicate()
+    dup.rewind()
+    if (!dup.hasRemaining()) return ByteArray(0)
+    val raw = ByteArray(dup.remaining())
+    dup.get(raw)
+    val hasStart = raw.size >= 3 && raw[0] == 0.toByte() && raw[1] == 0.toByte() &&
+        (raw[2] == 1.toByte() || (raw.size >= 4 && raw[2] == 0.toByte() && raw[3] == 1.toByte()))
+    return if (hasStart) raw else byteArrayOf(0, 0, 0, 1) + raw
 }
