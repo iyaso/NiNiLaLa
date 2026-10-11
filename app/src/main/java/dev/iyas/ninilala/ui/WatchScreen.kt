@@ -1,24 +1,25 @@
 package dev.iyas.ninilala.ui
 
 import android.net.Uri
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -31,11 +32,13 @@ import androidx.compose.runtime.setValue
 import java.util.concurrent.atomic.AtomicBoolean
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -86,43 +89,47 @@ fun WatchScreen(
         }
 
         if (streams.isEmpty()) {
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center,
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 36.dp),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally,
             ) {
+                Image(
+                    painter = painterResource(R.drawable.ill_watch_empty),
+                    contentDescription = null,
+                    modifier = Modifier.size(160.dp),
+                    contentScale = ContentScale.Fit,
+                )
+                Spacer(Modifier.height(20.dp))
+                Text(
+                    text = stringResource(R.string.watch_searching),
+                    style = MaterialTheme.typography.titleLarge,
+                    color = scheme.onBackground.copy(alpha = 0.8f),
+                    textAlign = TextAlign.Center,
+                )
                 Text(
                     text = stringResource(R.string.watch_empty),
                     style = MaterialTheme.typography.bodyLarge,
-                    color = scheme.onSurface.copy(alpha = 0.6f),
-                    modifier = Modifier.padding(horizontal = 32.dp),
+                    color = scheme.onSurface.copy(alpha = 0.5f),
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(top = 8.dp),
                 )
             }
         } else {
             LazyColumn(
                 contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 items(streams, key = { "${it.host}:${it.port}:${it.name}" }) { stream ->
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(18.dp))
-                            .background(scheme.surfaceVariant)
-                            .clickable { onSelect(stream) }
-                            .padding(horizontal = 18.dp, vertical = 16.dp),
-                    ) {
-                        Text(
-                            text = stream.name,
-                            style = MaterialTheme.typography.titleLarge,
-                            color = scheme.onBackground,
-                        )
-                        Text(
-                            text = "${stream.host}:${stream.port}",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = scheme.primary.copy(alpha = 0.85f),
-                            modifier = Modifier.padding(top = 4.dp),
-                        )
-                    }
+                    SoftActionCard(
+                        label = stream.name,
+                        hint = "${stream.host}:${stream.port}",
+                        accent = scheme.primary,
+                        illustration = R.drawable.ill_btn_watch,
+                        onClick = { onSelect(stream) },
+                    )
                 }
             }
         }

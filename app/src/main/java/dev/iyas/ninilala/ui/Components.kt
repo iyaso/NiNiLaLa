@@ -29,9 +29,9 @@ fun CircleIconButton(
     IconButton(
         onClick = onClick,
         modifier = modifier
-            .size(44.dp)
+            .size(48.dp)
             .clip(CircleShape)
-            .background(scheme.onSurface.copy(alpha = 0.12f)),
+            .background(scheme.surface.copy(alpha = 0.92f)),
         colors = IconButtonDefaults.iconButtonColors(
             contentColor = tint,
             containerColor = Color.Transparent,
@@ -40,7 +40,7 @@ fun CircleIconButton(
         Icon(
             painter = painter,
             contentDescription = contentDescription,
-            modifier = Modifier.size(22.dp),
+            modifier = Modifier.size(24.dp),
             tint = tint,
         )
     }
