@@ -53,9 +53,11 @@
     msg.textContent = 'Connecting…';
     msg.style.display = 'flex';
     let mode = 'video';
+    let audioFrameMs = 23;
     try {
       const status = await (await fetch('/status')).json();
       if (status.audio) mode = 'both';
+      if (status.sampleRate) audioFrameMs = Math.round(1024 / status.sampleRate * 1000);
     } catch (e) {}
 
     if (typeof JMuxer === 'undefined') {
@@ -94,7 +96,7 @@
           const payload = buf.slice(5, 5 + len);
           buf = buf.subarray(5 + len);
           if (type === 1) player.feed({ video: payload });
-          else if (type === 2) player.feed({ audio: payload });
+          else if (type === 2) player.feed({ audio: payload, duration: audioFrameMs });
           if (!saw) {
             saw = true;
             msg.style.display = 'none';

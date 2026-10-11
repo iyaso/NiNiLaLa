@@ -137,7 +137,8 @@ class StreamService : LifecycleService() {
             )
             if (!videoOk) error("camera failed to prepare")
             if (mic) {
-                val audioOk = camera.prepareAudio(44100, 64 * 1024, false)
+                // RootEncoder order is bitrate, sample rate, stereo.
+                val audioOk = camera.prepareAudio(64 * 1024, 44100, false)
                 if (!audioOk) Log.w(tag, "microphone failed to prepare; streaming video only")
             }
             camera.startStream()

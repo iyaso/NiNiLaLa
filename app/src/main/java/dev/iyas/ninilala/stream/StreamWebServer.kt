@@ -82,6 +82,7 @@ class StreamWebServer(private val context: Context) : NanoHTTPD("0.0.0.0", WEB_P
 
     fun publishAudio(buffer: ByteBuffer, info: MediaCodec.BufferInfo) {
         if (!running.get() || !audioEnabled || info.size <= 0) return
+        if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) return
         val aac = copy(buffer, info)
         broadcast(AUDIO, adts(aac) + aac)
     }
@@ -92,7 +93,7 @@ class StreamWebServer(private val context: Context) : NanoHTTPD("0.0.0.0", WEB_P
         "/status" -> newFixedLengthResponse(
             Response.Status.OK,
             "application/json",
-            """{"audio":$audioEnabled}""",
+            """{"audio":$audioEnabled,"sampleRate":$sampleRate}""",
         )
         "/stream" -> serveStream()
         else -> newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "not found")
