@@ -1,76 +1,32 @@
-# NiNi LaLa
+<p align="center">
+  <img src="docs/images/hero.png" alt="NiNi LaLa on three phones: home, a live stream with a browser QR code, and a nearby room ready to watch" width="920">
+</p>
 
-A peer-to-peer Android baby monitor that streams camera video over your local network — no servers, no accounts, no internet required.
+A baby monitor for two Android phones on the same Wi-Fi. One phone shares its camera. The other watches. The video stays on your network — no account, no cloud, no internet.
 
-## How it works
+## What it does
 
-One phone acts as the **camera** (Stream mode) and another as the **viewer** (Watch mode). The camera phone discovers nearby viewers using mDNS/NSD and streams H.264 video over a direct TCP connection.
+- **Phones find each other.** The camera announces itself on the local network. Watch lists whoever is streaming.
+- **Live picture.** H.264 goes straight from the camera phone to the viewer.
+- **A browser works too.** Start a stream, then scan the QR code from any phone or laptop on that Wi-Fi.
+- **It keeps going.** Streaming runs as a foreground service, so leaving the app does not drop the camera.
 
-```
-┌──────────────┐      LAN (Wi-Fi)        ┌──────────────┐
-│   Baby       │ ◄─────────────────────► │   Parents    │
-│  (Stream)    │    TCP + NSD/mDNS       │   (Watch)    │
-└──────────────┘                         └──────────────┘
-```
+## Try it
 
-## Features
+Install NiNi LaLa on two phones joined to the same Wi-Fi.
 
-- **Zero-config discovery** — phones find each other automatically via `_ninilala._tcp.` NSD service
-- **Low-latency streaming** — raw H.264 Annex-B access units over TCP with length-prefixed framing
-- **Foreground service** — camera keeps streaming when the app is backgrounded
-- **Front/back camera** toggle
-- **Minimal UI** — Material 3 with a soft pastel theme
+1. On the phone in the room, open **Stream** and tap **Start**.
+2. On the other phone, open **Watch** and tap the room.
+3. Or scan the QR code and open the stream in a browser.
 
-## Tech stack
+Android 13 or newer.
 
-| Layer | Technology |
-|-------|-----------|
-| Language | Kotlin |
-| UI | Jetpack Compose, Material 3 |
-| Camera | Camera2 API |
-| Encoding | MediaCodec (H.264) |
-| Discovery | NSD (mDNS/DNS-SD) |
-| Transport | Raw TCP sockets |
-| Min SDK | 33 (Android 13) |
-| Target SDK | 37 |
-
-## Project structure
-
-```
-app/src/main/java/dev/iyas/ninilala/
-├── stream/          # Camera capture, encoding, and TCP server
-│   ├── CameraEncoder.kt
-│   ├── PreviewCamera.kt
-│   ├── StreamServer.kt
-│   ├── StreamService.kt
-│   └── NsdAdvertiser.kt
-├── watch/           # Viewer-side discovery and playback
-│   ├── LanDiscovery.kt
-│   └── StreamPlayer.kt
-├── ui/              # Compose screens and navigation
-│   ├── HomeScreen.kt
-│   ├── StreamScreen.kt
-│   ├── WatchScreen.kt
-│   └── ...
-├── LanProtocol.kt   # Shared protocol constants
-├── MainActivity.kt
-└── SplashActivity.kt
-```
-
-## Building
+## Build
 
 ```bash
 ./gradlew assembleDebug
 ```
 
-The APK will be at `app/build/outputs/apk/debug/app-debug.apk`.
+The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
 
-## Usage
-
-1. Install the app on two Android phones connected to the same Wi-Fi network
-2. On the **camera phone**: tap **Stream** → grant camera permission → tap **Start**
-3. On the **viewer phone**: tap **Watch** → select the discovered stream → live video plays
-
-## License
-
-Proprietary — all rights reserved.
+Kotlin, Jetpack Compose, Camera2, and NSD. Package name `dev.iyas.ninilala`.
