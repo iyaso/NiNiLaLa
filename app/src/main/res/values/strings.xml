@@ -1,0 +1,28 @@
+<resources>
+    <string name="app_name">NiNi LaLa</string>
+    <string name="home_tagline">Keep an eye on little ones over Wi‑Fi</string>
+    <string name="home_stream">Stream</string>
+    <string name="home_stream_hint">Share camera</string>
+    <string name="home_watch">Watch</string>
+    <string name="home_watch_hint">View nearby</string>
+    <string name="action_start">Start</string>
+    <string name="action_stop">Stop</string>
+    <string name="action_allow_camera">Allow camera</string>
+    <string name="action_back">Back</string>
+    <string name="action_switch_camera">Switch camera</string>
+    <string name="streaming_label">Streaming</string>
+    <string name="watch_empty">No one is streaming on this Wi‑Fi yet</string>
+    <string name="watch_searching">Looking for nearby streams…</string>
+    <string name="camera_permission_needed">Camera access is needed to share the view</string>
+    <string name="notification_channel_name">Streaming</string>
+    <string name="notification_channel_desc">Shown while this phone is sharing its camera</string>
+    <string name="notification_streaming_title">Streaming</string>
+    <string name="notification_streaming_text">Camera is shared on your network</string>
+    <string name="status_connecting">Connecting…</string>
+    <string name="status_reconnecting">Reconnecting…</string>
+    <string name="status_failed">Connection failed</string>
+    <string name="status_viewer_connected">Someone is watching</string>
+    <string name="status_no_viewer">Waiting for someone to join…</string>
+    <string name="web_viewer_hint">Scan to watch in any browser on this Wi‑Fi</string>
+    <string name="web_viewer_qr_desc">QR code with the stream web address</string>
+</resources>

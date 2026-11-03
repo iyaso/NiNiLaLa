@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<link rel="icon" href="data:,">
+<title>NiNi LaLa</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  video { width: 100%; height: 100%; object-fit: contain; display: block; background: #000; }
+  #msg {
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: #9a9a9a; font: 16px/1.5 system-ui, sans-serif; text-align: center;
+    padding: 24px; pointer-events: none;
+  }
+  #sound {
+    position: fixed; right: 16px; bottom: 16px;
+    border: 0; border-radius: 999px; padding: 10px 16px;
+    font: 14px system-ui, sans-serif; background: #fff; color: #111;
+  }
+</style>
+</head>
+<body>
+<video id="v" muted playsinline autoplay></video>
+<div id="msg">Connecting…</div>
+<button id="sound" type="button">Sound on</button>
+<script src="jmuxer.min.js"></script>
+<script>
+(() => {
+  const video = document.getElementById('v');
+  const msg = document.getElementById('msg');
+  const sound = document.getElementById('sound');
+  let player = null;
+  let stopped = false;
+
+  sound.onclick = () => {
+    video.muted = !video.muted;
+    sound.textContent = video.muted ? 'Sound on' : 'Mute';
+    video.play().catch(() => {});
+  };
+
+  function fail(text) {
+    if (stopped) return;
+    msg.textContent = text;
+    msg.style.display = 'flex';
+    try { player && player.destroy(); } catch (e) {}
+    player = null;
+    setTimeout(run, 1000);
+  }
+
+  async function run() {
+    if (stopped) return;
+    msg.textContent = 'Connecting…';
+    msg.style.display = 'flex';
+    let mode = 'video';
+    let audioFrameMs = 23;
+    try {
+      const status = await (await fetch('/status')).json();
+      if (status.audio) mode = 'both';
+      if (status.sampleRate) audioFrameMs = Math.round(1024 / status.sampleRate * 1000);
+    } catch (e) {}
+
+    if (typeof JMuxer === 'undefined') {
+      fail('Player failed to load');
+      return;
+    }
+    player = new JMuxer({
+      node: video,
+      mode,
+      flushingTime: 100,
+      fps: 30,
+      clearBuffer: true,
+      onError: () => fail('Reconnecting…'),
+    });
+
+    let res;
+    try { res = await fetch('/stream'); } catch (e) { return fail('Reconnecting…'); }
+    if (!res.ok || !res.body) return fail('Reconnecting…');
+
+    const reader = res.body.getReader();
+    let buf = new Uint8Array(0);
+    let saw = false;
+    try {
+      while (!stopped) {
+        const { done, value } = await reader.read();
+        if (done) return fail('Reconnecting…');
+        const next = new Uint8Array(buf.length + value.length);
+        next.set(buf);
+        next.set(value, buf.length);
+        buf = next;
+        while (buf.length >= 5) {
+          const len = new DataView(buf.buffer, buf.byteOffset, buf.byteLength).getUint32(1);
+          if (len > 2_000_000) return fail('Reconnecting…');
+          if (buf.length < 5 + len) break;
+          const type = buf[0];
+          const payload = buf.slice(5, 5 + len);
+          buf = buf.subarray(5 + len);
+          if (type === 1) player.feed({ video: payload });
+          else if (type === 2) player.feed({ audio: payload, duration: audioFrameMs });
+          if (!saw) {
+            saw = true;
+            msg.style.display = 'none';
+            video.play().catch(() => {});
+          }
+        }
+        if (buf.byteOffset > 0) buf = buf.slice();
+      }
+    } catch (e) {
+      fail('Reconnecting…');
+    }
+  }
+
+  window.addEventListener('pagehide', () => { stopped = true; });
+  run();
+})();
+</script>
+</body>
+</html>

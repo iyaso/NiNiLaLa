@@ -1,0 +1,21 @@
+default_platform(:android)
+
+platform :android do
+  desc "Deploy to Play Store internal testing track"
+  lane :deploy_internal do
+    supply(
+      track: 'internal',
+      aab: '../app/build/outputs/bundle/release/app-release.aab',
+      json_key_data: ENV['SUPPLY_JSON_KEY_DATA']
+    )
+  end
+
+  desc "Deploy to Play Store production"
+  lane :deploy_production do
+    supply(
+      track: 'production',
+      aab: '../app/build/outputs/bundle/release/app-release.aab',
+      json_key_data: ENV['SUPPLY_JSON_KEY_DATA']
+    )
+  end
+end
