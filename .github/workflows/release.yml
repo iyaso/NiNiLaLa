@@ -67,7 +67,9 @@ jobs:
 
       - name: Create GitHub Release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Repo Actions are read-only, so the default GITHUB_TOKEN cannot
+          # create releases (403 "Resource not accessible by integration").
+          GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
           VERSION_CODE=${{ steps.version.outputs.code }}
           VERSION_NAME=${{ steps.version.outputs.name }}
@@ -78,11 +80,18 @@ jobs:
           git tag -a "$TAG" -m "Release $TAG" || echo "Tag $TAG already exists"
           git push origin "$TAG" || echo "Tag $TAG already exists on remote"
 
-          gh release create "$TAG" \
-            --title "Release $VERSION_NAME" \
-            --notes "Release $VERSION_NAME (build $VERSION_CODE)" \
-            app/build/outputs/bundle/release/app-release.aab \
-            app/build/outputs/apk/release/app-release.apk
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" \
+              app/build/outputs/bundle/release/app-release.aab \
+              app/build/outputs/apk/release/app-release.apk \
+              --clobber
+          else
+            gh release create "$TAG" \
+              --title "Release $VERSION_NAME" \
+              --notes "Release $VERSION_NAME (build $VERSION_CODE)" \
+              app/build/outputs/bundle/release/app-release.aab \
+              app/build/outputs/apk/release/app-release.apk
+          fi
 
       - name: Setup Ruby
         uses: ruby/setup-ruby@v1
